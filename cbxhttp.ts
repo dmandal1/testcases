@@ -75,9 +75,8 @@ describe('CbxHttpService', () => {
       const cbxAccount: CbxAccount = { username: 'user', password: 'encrypted' } as CbxAccount;
 
       jest.spyOn(service, 'getAccessToken').mockResolvedValue({
-        access_token: 'newToken',
-        expires_in: 3600,
-      });
+        data: { access_token: 'newToken', expires_in: 3600 },
+      } as AxiosResponse);
 
       await service['_renewToken'](cbxAccount);
 
@@ -104,7 +103,7 @@ describe('CbxHttpService', () => {
 
       const result = await service.getAccessToken(cbxAccount);
 
-      expect(result).toEqual({ access_token: 'mockToken', expires_in: 3600 });
+      expect(result).toEqual(response.data);
     });
 
     it('should throw an error when request fails', async () => {
