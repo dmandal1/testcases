@@ -1,201 +1,198 @@
-import { CBX_ENDPOINTS } from '@constants';
-import { HttpService } from '@nestjs/axios';
-import { HttpException, Injectable, Logger } from '@nestjs/common';
+import { Test, TestingModule } from '@nestjs/testing';
+import { CbxHttpService } from './cbx-http.service';
 import { ConfigService } from '@nestjs/config';
-import { getExpiryDateTime, isExpired } from '@utils';
-import { AxiosResponse } from 'axios';
-import {
-  catchError,
-  firstValueFrom,
-  map,
-  Observable,
-  retry,
-  throwError,
-} from 'rxjs';
 import { CacheService } from '@cache';
+import { HttpService } from '@nestjs/axios';
 import { RequestContextService } from 'src/common/interceptors/request-context.service';
 import { EncryptionService } from '@modules/utils/encryption/encryption.service';
 import { CbxAccount } from '@modules/aclAuth/entities/CbxAccount.entity';
+import { of, throwError } from 'rxjs';
+import { AxiosResponse } from 'axios';
 
-@Injectable()
-export class CbxHttpService {
-  private readonly baseUrl: string;
-  constructor(
-    private readonly configService: ConfigService,
-    private readonly cacheService: CacheService,
-    private readonly httpService: HttpService,
-    private readonly requestContextService: RequestContextService,
-    private readonly encryptionService: EncryptionService,
-  ) {
-    this.baseUrl = this.configService.get('CBX_DOMAIN');
-  }
+describe('CbxHttpService', () => {
+  let service: CbxHttpService;
+  let httpService: HttpService;
+  let cacheService: CacheService;
+  let configService: ConfigService;
+  let encryptionService: EncryptionService;
 
-  private async _renewToken(cbxAccount: CbxAccount = undefined) {
-    const tokenInfo: any = await this.getAccessToken(cbxAccount);
+  beforeEach(async () => {
+    const module: TestingModule = await Test.createTestingModule({
+      providers: [
+        CbxHttpService,
+        {
+          provide: ConfigService,
+          useValue: {
+            get: jest.fn().mockImplementation((key) => {
+              if (key === 'CBX_DOMAIN') return 'https://cbx.api.com';
+              if (key === 'CBX_ACCESS_USERNAME') return 'testUser';
+              if (key === 'CBX_ACCESS_PASSWORD') return 'testPassword';
+              return null;
+            }),
+          },
+        },
+        {
+          provide: CacheService,
+          useValue: {
+            get: jest.fn(),
+            set: jest.fn(),
+          },
+        },
+        {
+          provide: HttpService,
+          useValue: {
+            post: jest.fn(),
+            get: jest.fn(),
+            patch: jest.fn(),
+          },
+        },
+        {
+          provide: RequestContextService,
+          useValue: {},
+        },
+        {
+          provide: EncryptionService,
+          useValue: {
+            decrypt: jest.fn().mockReturnValue('decryptedPassword'),
+          },
+        },
+      ],
+    }).compile();
 
-    const expireAt = getExpiryDateTime({ seconds: tokenInfo.expires_in - 10 });
-    const token = tokenInfo.access_token;
+    service = module.get<CbxHttpService>(CbxHttpService);
+    httpService = module.get<HttpService>(HttpService);
+    cacheService = module.get<CacheService>(CacheService);
+    configService = module.get<ConfigService>(ConfigService);
+    encryptionService = module.get<EncryptionService>(EncryptionService);
+  });
 
-    Logger.log('Renew token expire at ' + expireAt);
+  it('should be defined', () => {
+    expect(service).toBeDefined();
+  });
 
-    await this.cacheService.set(cbxAccount.username, {
-      token,
-      expireAt,
+  describe('_renewToken', () => {
+    it('should renew token and cache it', async () => {
+      const cbxAccount: CbxAccount = { username: 'user', password: 'encrypted' } as CbxAccount;
+
+      jest.spyOn(service, 'getAccessToken').mockResolvedValue({
+        access_token: 'newToken',
+        expires_in: 3600,
+      });
+
+      await service['_renewToken'](cbxAccount);
+
+      expect(cacheService.set).toHaveBeenCalledWith('user', {
+        token: 'newToken',
+        expireAt: expect.any(String),
+      });
+    });
+  });
+
+  describe('getAccessToken', () => {
+    it('should return access token successfully', async () => {
+      const cbxAccount: CbxAccount = { username: 'testUser', password: 'encrypted' } as CbxAccount;
+
+      const response: AxiosResponse = {
+        data: { access_token: 'mockToken', expires_in: 3600 },
+        status: 200,
+        statusText: 'OK',
+        headers: {},
+        config: {},
+      };
+
+      jest.spyOn(httpService, 'post').mockReturnValue(of(response));
+
+      const result = await service.getAccessToken(cbxAccount);
+
+      expect(result).toEqual({ access_token: 'mockToken', expires_in: 3600 });
     });
 
-    return token;
-  }
+    it('should throw an error when request fails', async () => {
+      const cbxAccount: CbxAccount = { username: 'testUser', password: 'encrypted' } as CbxAccount;
 
-  private async _getToken(cbxAccount: CbxAccount = undefined) {
-    const tokenInfo = await this.cacheService.get(cbxAccount.username);
+      jest.spyOn(httpService, 'post').mockReturnValue(
+        throwError(() => ({
+          response: { data: 'Error', status: 401 },
+        })),
+      );
 
-    Logger.log(
-      `Token isExpired: ${
-        tokenInfo?.expireAt && isExpired(tokenInfo.expireAt)
-      }`,
-    );
+      await expect(service.getAccessToken(cbxAccount)).rejects.toThrow();
+    });
+  });
 
-    return !tokenInfo || isExpired(tokenInfo.expireAt)
-      ? this._renewToken(cbxAccount)
-      : tokenInfo.token;
-  }
+  describe('get', () => {
+    it('should return data from GET request', async () => {
+      const url = 'test-endpoint';
+      const cbxAccount: CbxAccount = { username: 'testUser', password: 'encrypted' } as CbxAccount;
 
-  private async _getHeader(cbxAccount: CbxAccount = undefined) {
-    return {
-      headers: {
-        Authorization: `Bearer ${await this._getToken(cbxAccount)}`,
-      },
-    };
-  }
+      const response: AxiosResponse = {
+        data: { success: true },
+        status: 200,
+        statusText: 'OK',
+        headers: {},
+        config: {},
+      };
 
-  // Get API access token from CBX
-  getAccessToken(cbxAccount: CbxAccount = undefined): Promise<AxiosResponse> {
-    Logger.log(`CbxAccount to getAccessToken: ${JSON.stringify(cbxAccount)}`);
+      jest.spyOn(service as any, '_getHeader').mockResolvedValue({
+        headers: { Authorization: 'Bearer mockToken' },
+      });
 
-    const username = cbxAccount.username;
-    const password = this.encryptionService.decrypt(cbxAccount.password);
+      jest.spyOn(httpService, 'get').mockReturnValue(of(response));
 
-    const authUser = this.configService.get('CBX_ACCESS_USERNAME');
-    const authPassword = this.configService.get('CBX_ACCESS_PASSWORD');
-    const cbxTokenEndpoint = `${this.baseUrl}/${CBX_ENDPOINTS.GET_OAUTH_TOKEN}`;
+      const result = await service.get(url, cbxAccount);
 
-    return new Promise((resolve, reject) =>
-      this.httpService
-        .post(
-          cbxTokenEndpoint,
-          {},
-          {
-            auth: { username: authUser, password: authPassword },
-            params: { grant_type: 'password', username, password },
-          },
-        )
-        .subscribe({
-          next: ({ data }: any) => resolve(data),
-          error: (err: any) =>
-            reject(new HttpException(err.response?.data, err.response?.status)),
-        }),
-    );
-  }
+      expect(result).toEqual({ success: true });
+    });
+  });
 
-  private _postProcessResponse(
-    obs$: Observable<AxiosResponse>,
-    retryCount: number,
-  ): Promise<any> {
-    return new Promise((resolve, reject) =>
-      obs$
-        .pipe(
-          map((res: any) => {
-            // Check if status is 201 and response body is empty - to handle file upload api
-            if (res.status === 201 && !res.data) {
-              console.log('-----------inside upload file scnario')
-              return {
-                data: null,
-                status: res.status,
-                message: 'Successfully processed but response body is empty.',
-              };
-            }
-            return res.data; // for 200 status return the res.data
-          }),
-          retry(retryCount),
-          catchError((err) =>
-            throwError(() => {
-              if (!err.response) {
-                const unreachableError = {
-                  response: { data: 'Service is unreachable', status: null },
-                };
-                Logger.error(unreachableError.response);
-                return unreachableError;
-              }
+  describe('post', () => {
+    it('should send a POST request and return data', async () => {
+      const url = 'test-endpoint';
+      const cbxAccount: CbxAccount = { username: 'testUser', password: 'encrypted' } as CbxAccount;
+      const data = { key: 'value' };
 
-              const { response } = err || {};
-              const { data, status } = response || {};
-              Logger.error({ data, status });
-              return { response: { data, status } };
-            }),
-          ),
-        )
-        .subscribe({
-          next: (data) => resolve(data),
-          error: (err) => reject(err),
-        }),
-    );
-  }
+      const response: AxiosResponse = {
+        data: { success: true },
+        status: 200,
+        statusText: 'OK',
+        headers: {},
+        config: {},
+      };
 
-  async get(
-    url: string,
-    cbxAccount: CbxAccount = undefined,
-    retryCount = 0,
-  ): Promise<AxiosResponse['data']> {
-    const header =
-      url !== CBX_ENDPOINTS.GET_HEALTH_STATUS
-        ? await this._getHeader(cbxAccount)
-        : {};
-    return this._postProcessResponse(
-      this.httpService.get(`${this.baseUrl}/${url}`, header),
-      retryCount,
-    );
-  }
+      jest.spyOn(service as any, '_getHeader').mockResolvedValue({
+        headers: { Authorization: 'Bearer mockToken' },
+      });
 
-  async getHealth(url: string, retryCount = 0): Promise<AxiosResponse['data']> {
-    return this._postProcessResponse(
-      this.httpService.get(`${this.baseUrl}/${url}`),
-      retryCount,
-    );
-  }
+      jest.spyOn(httpService, 'post').mockReturnValue(of(response));
 
-  async getResponse(url: string): Promise<AxiosResponse> {
-    const header = await this._getHeader();
-    const response = await firstValueFrom(
-      this.httpService.get(`${this.baseUrl}/${url}`, header),
-    );
-    return response;
-  }
+      const result = await service.post(url, cbxAccount, data);
 
-  async post(
-    url: string,
-    cbxAccount: CbxAccount,
-    data: any,
-    config: any = {},
-    retryCount = 0,
-  ): Promise<AxiosResponse['data']> {
-    let header = await this._getHeader(cbxAccount);
-    header = Object.keys(config).length > 0 ? header : {...header,
-      ...config};
-    return this._postProcessResponse(
-      this.httpService.post(`${this.baseUrl}/${url}`, data, header),
-      retryCount,
-    );
-  }
+      expect(result).toEqual({ success: true });
+    });
+  });
 
-  async patch(
-    url: string,
-    data: any,
-    retryCount = 0,
-  ): Promise<AxiosResponse['data']> {
-    const header = await this._getHeader();
-    return this._postProcessResponse(
-      this.httpService.patch(`${this.baseUrl}/${url}`, data, header),
-      retryCount,
-    );
-  }
-}
+  describe('patch', () => {
+    it('should send a PATCH request and return data', async () => {
+      const url = 'test-endpoint';
+      const data = { key: 'value' };
+
+      const response: AxiosResponse = {
+        data: { success: true },
+        status: 200,
+        statusText: 'OK',
+        headers: {},
+        config: {},
+      };
+
+      jest.spyOn(service as any, '_getHeader').mockResolvedValue({
+        headers: { Authorization: 'Bearer mockToken' },
+      });
+
+      jest.spyOn(httpService, 'patch').mockReturnValue(of(response));
+
+      const result = await service.patch(url, data);
+
+      expect(result).toEqual({ success: true });
+    });
+  });
+});
