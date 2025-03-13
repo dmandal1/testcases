@@ -9,6 +9,10 @@ import { getRepositoryToken } from '@nestjs/typeorm';
 import { User } from '@modules/aclAuth/entities/User.entity';
 import { BadRequestException, HttpException } from '@nestjs/common';
 
+jest.mock('../../providers/cbxHttpService/cbxHttp.service');
+jest.mock('@providers/cache/cache.service');
+jest.mock('@nestjs/config');
+
 describe('CodeListService', () => {
   let service: CodeListService;
   let cbxHttpService: jest.Mocked<CbxHttpService>;
@@ -31,6 +35,11 @@ describe('CodeListService', () => {
           provide: CbxHttpService,
           useValue: {
             get: jest.fn(),
+            post: jest.fn(),
+            patch: jest.fn(),
+            getAccessToken: jest.fn(),
+            getHealth: jest.fn(),
+            getResponse: jest.fn(),
           } as jest.Mocked<CbxHttpService>,
         },
         {
@@ -56,10 +65,10 @@ describe('CodeListService', () => {
     }).compile();
 
     service = module.get<CodeListService>(CodeListService);
-    cbxHttpService = module.get<CbxHttpService>(CbxHttpService);
-    cacheService = module.get<CacheService>(CacheService);
-    configService = module.get<ConfigService>(ConfigService);
-    cbxAccountRepository = module.get<Repository<CbxAccount>>(getRepositoryToken(CbxAccount, 'aclDbConnection'));
+    cbxHttpService = module.get(CbxHttpService);
+    cacheService = module.get(CacheService);
+    configService = module.get(ConfigService);
+    cbxAccountRepository = module.get(getRepositoryToken(CbxAccount, 'aclDbConnection'));
   });
 
   describe('getOne', () => {
